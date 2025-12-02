@@ -12,11 +12,9 @@ collaborative-editor/
 │   ├── vector_clock.py     # Implementação de relógio vetorial
 │   ├── crdt_document.py    # CRDT de Sequência (RGA)
 │   ├── node.py             # Nó distribuído principal
+│   ├── run_test.sh         # Testes automatizados
 │   └── main.py             # Interface CLI
-├── tests/
-│   └── test_scenarios.py   # Cenários de teste
-├── README.md
-└── requirements.txt
+└── README.txt
 ```
 
 ## 🚀 Como Executar
@@ -27,25 +25,41 @@ collaborative-editor/
 
 ### Passos para Execução
 
+## Execução Manual (Nó a Nó)
+
 1. **Abra 3 terminais diferentes**
 
 2. **Terminal 1 - Node 1:**
 ```bash
 cd src
-python main.py node1
+python3 main.py node1
 ```
 
 3. **Terminal 2 - Node 2:**
 ```bash
 cd src
-python main.py node2
+python3 main.py node2
 ```
 
 4. **Terminal 3 - Node 3:**
 ```bash
 cd src
-python main.py node3
+python3 main.py node3
 ```
+
+## Execução automatizada (script bash)
+
+1. **Dê permissão de execução ao script:**
+```bash
+cd src
+chmod +x run_test.sh
+```
+
+2. **Execute  o script:**
+```bash
+./run_test.sh
+```
+
 
 ## 📝 Comandos Disponíveis
 
@@ -56,51 +70,60 @@ python main.py node3
 - `help` - Mostra ajuda
 - `quit` - Sai do programa
 
-## 🧪 Cenários de Teste
-
-### Teste 1: Inserção Concorrente
-1. Em node1: `insert 0 X`
-2. Em node2: `insert 0 Y` (ao mesmo tempo)
-3. Verificar: ambos convergem para mesma ordem (XY ou YX)
-
-### Teste 2: Inserção e Deleção Concorrente
-1. Em node1: `insert 0 A`
-2. Em node1: `insert 1 B`
-3. Em node2: `delete 0` (deleta A)
-4. Em node1: `insert 1 C` (insere C entre A e B)
-5. Verificar: todos convergem para mesmo estado
-
 ## 🏗️ Arquitetura
 
 ### Classes Principais
 
-- **Character**: Representa um caractere com ID único e flag de deleção
-- **VectorClock**: Rastreamento causal de eventos
-- **CRDTDocument**: Gerencia lista ordenada de caracteres (RGA)
-- **Node**: Coordena comunicação TCP e operações CRDT
+- **Character**: Representa um caractere atômico contendo seu valor, um identificador único imutável (`position_id`) e uma flag de estado (`deleted`). Implementa a lógica de comparação (`__lt__`) para ordenação determinística.
+- **VectorClock**: Gerencia os relógios lógicos para rastreamento causal de eventos entre os nós.
+- **CRDTDocument**: Implementa a lógica do **RGA (Replicated Growable Array)**. Mantém a lista linear de caracteres e gerencia inserções relativas (baseadas em um caractere de origem) e deleções lógicas (tombstones).
+- **Node**: Gerencia a camada de rede (Sockets TCP), o *broadcast* de mensagens, a serialização/desserialização de dados e a sincronização de threads.
 
 ### Protocolo de Mensagens
 
-Formato JSON:
+As mensagens são trocadas em formato JSON. Foi implementada uma **serialização customizada** para garantir que Tuplas (usadas nos IDs locais) sejam convertidas corretamente para Listas (JSON) e reconstruídas como Tuplas no destino, evitando erros de tipagem na comparação.
+
+**Inserção:**
 ```json
 {
-  "type": "insert"|"delete",
+  "type": "insert",
   "op_id": {"node1": 5, "node2": 3, "node3": 1},
   "site_id": "node1",
-  "char_data": {...} ou "pos_id": [...]
+  "char": {
+    "value": "A",
+    "vector_clock": [["node1", 5], ["node2", 3]], 
+    "site_id": "node1", 
+    "deleted": false
+  },
+  "origin_id": [["node1", 4], ["node2", 3], "node1"] // ID do vizinho à esquerda
+}
+```
+
+**Deleção:**
+```json
+{
+  "type": "delete",
+  "site_id": "node2",
+  "target_id": [["node1", 5], ["node2", 3], "node1"] // ID exato do caractere a remover
 }
 ```
 
 ## 🔧 Detalhes de Implementação
 
-- **Ordenação**: Position ID = (VectorClock, site_id)
-- **Comunicação**: TCP full-mesh (cada nó conecta com todos)
-- **Consistência**: Strong Eventual Consistency (SEC)
-- **Idempotência**: Verificação de duplicatas antes de inserir
+- **Algoritmo CRDT**: RGA (Replicated Growable Array). Garante que inserções concorrentes na mesma posição sejam ordenadas de forma consistente em todos os nós (desempate via site_id em caso de relógios idênticos).
+
+- **Endereçamento**: Inserções são relativas ao origin_id (caractere anterior), garantindo que o texto não se "misture" incorretamente mesmo se a lista remota tiver tamanho diferente.
+
+- **Tombstones**: Deleções são lógicas. O caractere é marcado como deleted=True, mas permanece na estrutura para garantir a integridade de referências futuras (causalidade).
+
+- **Consistência**: Strong Eventual Consistency (SEC) atingida. Todos os nós convergem para o mesmo estado visual e interno após a troca de mensagens.
+
+- **Tratamento de Tipos**: Normalização robusta na entrada de dados (_deserialize_id) para converter listas JSON em tuplas Python hashable.
 
 ## 📊 Limitações Conhecidas
 
-- Hardcoded para 3 nós em localhost
-- Sem persistência de dados
-- Sem reconexão automática em caso de falha
-- UI CLI simples (não é editor visual completo)
+- **Acúmulo de Lixo (Memory Leak)**: Caracteres deletados (tombstones) nunca são removidos da memória. Em um ambiente de produção, seria necessário um Garbage Collection distribuído.
+
+- **Escalabilidade de Rede**: Topologia Full-mesh com configuração estática (hardcoded para 3 nós em localhost). Não possui peer discovery dinâmico.
+
+- **Recuperação de Falhas**: Não há persistência em disco ou mecanismo de reconexão automática se um nó cair e voltar (o nó reiniciado perderia o histórico).
