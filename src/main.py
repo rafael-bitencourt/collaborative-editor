@@ -66,8 +66,10 @@ def main():
                     print(f"{i}", end="")
                 print()
                 
-                command = input(f"\n[{node_id}]> ").strip()
-                
+                try:
+                    command = input(f"\n[{node_id}]> ").strip()
+                except EOFError:
+                    break
                 if not command:
                     continue
                 

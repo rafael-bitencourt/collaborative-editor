@@ -141,77 +141,102 @@ class Node:
             conn.sendall(handshake.encode('utf-8'))
         except Exception as e:
             print(f"[Node {self.node_id}] Erro enviando handshake: {e}")
-    
-    def _process_message(self, msg):
-        """Processa uma mensagem recebida"""
-        try:
-            with self.lock:
-                # Atualiza relógio vetorial
-                self.vector_clock.update(msg['op_id'])
-                
-                # Aplica operação
-                if msg['type'] == 'insert':
-                    applied_pos, applied_text = self.document.remote_insert(
-                        msg['position'], msg['text']
-                    )
-                    self.operation_log.append(
-                        f"Remote INSERT: '{applied_text}' at pos {applied_pos} from {msg['site_id']}"
-                    )
-                
-                elif msg['type'] == 'delete':
-                    removed_char, applied_pos = self.document.remote_delete(msg['position'])
-                    char_snippet = f" '{removed_char}'" if removed_char is not None else ""
-                    self.operation_log.append(
-                        f"Remote DELETE{char_snippet} at pos {applied_pos} from {msg['site_id']}"
-                    )
-        
-        except Exception as e:
-            print(f"[Node {self.node_id}] Erro processando mensagem: {e}")
-    
+
     def insert(self, position, text_value):
-        """Insere texto localmente e propaga"""
         if not text_value:
             return
         with self.lock:
             self.vector_clock.increment()
-            applied_pos, applied_text = self.document.local_insert(position, text_value)
-            self.operation_log.append(
-                f"Local INSERT: '{applied_text}' at pos {applied_pos}"
-            )
-            message = {
-                'type': 'insert',
-                'op_id': self.vector_clock.get_copy(),
-                'site_id': self.node_id,
-                'position': applied_pos,
-                'text': applied_text
-            }
-            self._broadcast(message)
-    
-    def delete(self, position):
-        """
-        Deleta um caractere localmente e propaga para peers.
-        
-        Args:
-            position (int): Posição visual a deletar
-        """
-        with self.lock:
-            # Incrementa relógio vetorial
-            self.vector_clock.increment()
             
-            # Deleta localmente
-            removed_char, applied_pos = self.document.local_delete(position)
-            
-            if removed_char is not None:
-                self.operation_log.append(
-                    f"Local DELETE '{removed_char}' at pos {applied_pos}"
+            # Loop para inserir caractere por caractere (RGA trabalha melhor char a char)
+            current_pos = position
+            for char in text_value:
+                # Chama o CRDT atualizado
+                new_char_obj, origin_id = self.document.local_insert(
+                    current_pos, char, self.node_id, self.vector_clock
                 )
+                
+                # Prepara mensagem
+                origin_serialized = self._serialize_id(origin_id)
+                
                 message = {
-                    'type': 'delete',
+                    'type': 'insert',
                     'op_id': self.vector_clock.get_copy(),
                     'site_id': self.node_id,
-                    'position': applied_pos
+                    'char': new_char_obj.to_dict(),
+                    'origin_id': origin_serialized
                 }
                 self._broadcast(message)
+                
+                self.operation_log.append(f"Local INSERT '{char}' after {origin_serialized}")
+                current_pos += 1
+
+    def delete(self, position):
+        with self.lock:
+            self.vector_clock.increment()
+            target_char = self.document.local_delete(position)
+            
+            if target_char:
+                target_id_ser = self._serialize_id(target_char.position_id)
+                
+                message = {
+                    'type': 'delete',
+                    'site_id': self.node_id,
+                    'target_id': target_id_ser
+                }
+                self._broadcast(message)
+                self.operation_log.append(f"Local DELETE char {target_id_ser}")
+
+    def _process_message(self, msg):
+        try:
+            with self.lock:
+                # Atualiza relógio (se houver campo op_id no topo)
+                if 'op_id' in msg:
+                    self.vector_clock.update(msg['op_id'])
+                
+                if msg['type'] == 'insert':
+                    # Desserializa o origin ID
+                    origin_id = self._deserialize_id(msg['origin_id'])
+                    # O char vem como dict no campo 'char'
+                    self.document.remote_insert(msg['char'], origin_id)
+                    
+                    self.operation_log.append(f"Remote INSERT from {msg['site_id']}")
+                
+                elif msg['type'] == 'delete':
+                    target_id = self._deserialize_id(msg['target_id'])
+                    self.document.remote_delete(target_id)
+                    self.operation_log.append(f"Remote DELETE from {msg['site_id']}")
+                    
+        except Exception as e:
+            print(f"[Node {self.node_id}] Erro processando msg: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # Métodos auxiliares para serializar a tupla (VectorClock, site_id)
+    def _serialize_id(self, pos_id):
+        if pos_id is None: return None
+        # pos_id é ({'node': 1}, 'site')
+        # JSON não aceita chaves que não sejam string
+        clock, site = pos_id
+        # Garante que o clock seja serializável
+        if isinstance(clock, dict):
+            clock_list = list(clock.items())
+        else:
+            clock_list = clock
+        return [clock_list, site]
+
+    def _deserialize_id(self, list_data):
+        if list_data is None: return None
+        clock_list, site = list_data
+        
+        # CORREÇÃO CRÍTICA AQUI:
+        # O JSON traz listas de listas [[k,v], [k,v]].
+        # Precisamos converter as listas internas [k,v] em tuplas (k,v)
+        # para bater com o formato interno do Character.
+        
+        clock_tuple = tuple(sorted(tuple(item) for item in clock_list))
+        
+        return (clock_tuple, site)
     
     def _broadcast(self, message):
         """Envia mensagem para todos os peers conectados"""
